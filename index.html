@@ -1,0 +1,193 @@
+<!--
+ * @Author: xjh
+ * @Date: 2022-01-25 09:29:26
+ * @LastEditors: xjh
+ * @LastEditTime: 2022-03-25 11:10:07
+ * @Description: 
+-->
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8">
+    <title>Batch Download By StreamSaver</title>
+  </head>
+  <body>
+		<button id="action">Download</button>
+    <script src="./StreamSaver.js"></script>
+    <script>
+      class BatchDownload {
+			static nullFunc = () => {}
+			constructor({ url, name = '', sliceThreshold = 16 * 1024 * 1024 , sliceSize = 8 * 1024 * 1024, threads = 4, onProgress = BatchDownload.nullFunc, onSuccess = BatchDownload.nullFunc  }) {
+				this.downurl = url
+				this.name = name || url.split('/').splice(-1)[0]
+				this.sliceSize = sliceSize
+				this.sliceThreshold = sliceThreshold
+				this.threads = threads
+				this.allTasks = []
+				this.rangeTasks = []
+				this.pendingTasks = []
+				this.successTasks = []
+				this.failedTasks = []
+				this.blobs = []
+				this.onProgress = onProgress
+				this.onSuccess = onSuccess
+				this.startTime = Date.now()
+				this.totalCount = 0
+				this.headers = {}
+				this.writer = streamSaver.createWriteStream(this.name).getWriter()
+				this.readIndex = 0
+				this.start()
+			}
+	
+			getHeaders() {
+				const xhr  = new XMLHttpRequest()
+				xhr.open('HEAD', url, false)
+				xhr.send()
+				const headersStr = xhr.getAllResponseHeaders()
+				const headers = {}
+				headersStr.split(/(\r\n|\n)+/).filter(item => !/^\s*$/.test(item)).forEach(str => {
+					const arr = str.split(/:\s*/)
+					const key = arr[0]
+					let val = arr[1]
+					if (/^\d+$/.test(val)) {
+						val = Number(val)
+					}
+					headers[key] = val
+				})
+				this.headers = headers
+			}
+	
+			doStart() {
+				const length = this.headers['content-length']
+				const count = Math.ceil(length / this.sliceSize)
+				let lastEnd = -1
+				for (let i = 0; i < count; i++) {
+					const start = lastEnd + 1
+					lastEnd = start + this.sliceSize
+					if (i === count - 1) {
+						lastEnd = ''
+					}
+					this.rangeTasks.push({ start, end: lastEnd })
+				}
+				this.allTasks = this.rangeTasks.slice(0)
+				this.totalCount = this.allTasks.length
+				this.blobs = new Array(count).fill('')
+			}
+	
+			start() {
+				this.onProgress({ percent: 0 })
+
+				this.getHeaders()
+
+				const length = this.headers['content-length']
+				const isAllowRange = !!this.headers['accept-ranges']
+				if (!isAllowRange || length <= this.sliceThreshold) {
+					this.onProgress({ percent: 100 })
+					return this.doDownload(this.downurl)
+				}
+
+				this.doStart()
+
+				this.excuate()
+			}
+	
+			download() {
+				const task = this.rangeTasks.shift()
+				if (task) {
+					this.pendingTasks.push(task)
+					const { start, end } = task
+					fetch(this.downurl, {
+						headers: {
+							Range: `bytes=${start}-${end}`
+						}
+					})
+					.then(res => res.body)
+					.then(body => {
+						const index = this.allTasks.findIndex(tk => tk.start === task.start)
+						this.blobs[index] = body
+						this.successTasks.push(task)
+						this.pendingTasks = this.pendingTasks.filter(tk => tk.start !== task.start)
+						const successCount = this.successTasks.length
+						const cost = (Date.now() - this.startTime) / 60000
+						const percent = parseFloat(((successCount / this.totalCount)* 100).toFixed(2))
+						const estimate = parseFloat(((cost / percent) * 100).toFixed(2))
+						this.onProgress({ percent: Math.floor(percent), estimate })
+						this.checkDone(index)
+					}).catch(err => {
+						this.failedTasks.push(task)
+						this.pendingTasks = this.pendingTasks.filter(tk => tk.start !== task.start)
+						this.checkDone()
+					})
+				}
+			}
+
+			doDownload(url) {
+				const a = document.createElement('a')
+				a.href = url
+				a.download = this.name
+				a.click()
+			}
+	
+			excuate() {
+				const idle_threads = this.threads - this.pendingTasks.length
+				for (let i = 0; i < idle_threads; i++) {
+					this.download()
+				}
+			}
+	
+			checkDone(index) {
+				index === this.readIndex && this.readNext()
+
+				if (!this.pendingTasks.length) {
+					const failedLength = this.failedTasks.length
+					if (failedLength) {
+						this.rangeTasks = this.failedTasks.splice(0, failedLength)
+						this.excuate()
+					} else {
+						this.onSuccess()
+					}
+				} else {
+					this.excuate()
+				}
+			}
+
+			readNext() {
+				const reader = this.blobs[this.readIndex].getReader()
+				const push = () => {
+					reader.read().then(({ done, value }) => {
+					if (done) {
+						this.readIndex = this.readIndex + 1
+						if (this.readIndex === this.allTasks.length) {
+							this.writer.close()
+						} else if (this.readIndex <= this.allTasks.length - 1) {
+							this.blobs[this.readIndex] !== '' && this.readNext()
+						}
+						return
+					}
+						this.writer.write(value)
+						push()
+					})
+				}
+				push()
+			}
+		}
+		
+      const action = document.getElementById('action')
+      const url = 'fileUrl'
+
+      action.addEventListener('click', () => {
+        new BatchDownload({ 
+          url,
+          sliceSize: 8 * 1024 * 1024,
+          onProgress: ({ percent,  estimate }) => {
+            if (estimate) {
+              console.log('进度：%f, 预测时间：%f min', percent, estimate)
+            } else {
+              console.log('进度：%f', percent)
+            }
+          }
+        })
+      })
+    </script>
+  </body>
+</html>
